@@ -1,0 +1,8 @@
+services:
+  credit-notes:
+    build:
+      context: ..
+      dockerfile: credit-notes/Dockerfile
+    volumes:
+      - ./notes_downloads:/app/notes_downloads
+      - ./logs:/app/logs
