@@ -2,16 +2,23 @@ import multiprocessing
 import os
 import asyncio
 from datetime import datetime
+import json
+import uuid
 
 from playwright.async_api import async_playwright
-from portal_processor import AsyncPortalProcessor  # Importar la clase mejorada
+from portal_processor import AsyncPortalProcessor
 from utils import cleanup_directories
+from s3_uploader import S3Uploader
+from logger import Logger
 
+APP_ENV = os.getenv("APP_ENV", "production")
 
-async def _async_worker(client_data, target_date, client_download_dir):
+async def _async_worker(client_data, target_date, client_download_dir, app_env, execution_id):
     """
     Función ASÍNCRONA que contiene la lógica de Playwright con manejo mejorado de errores.
     """
+    logger = Logger(client_data['name'], execution_id)
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
@@ -28,25 +35,23 @@ async def _async_worker(client_data, target_date, client_download_dir):
                 main_url=client_data["url"],
                 credentials=credentials,
                 target_date=target_date,
-                base_download_dir=client_download_dir
+                base_download_dir=client_download_dir,
+                app_env=app_env,
+                logger=logger
             )
 
-            # Ahora run() retorna un diccionario con PDFs y errores
             results = await processor.run()
 
-            # Determinar el estado basado en los resultados
             if results["errores"]:
                 if results["pdfs_descargados"]:
                     status = "partial_success"
-                    print(
-                        f"⚠️ Completado parcialmente: {client_data['name']} - {len(results['pdfs_descargados'])} PDFs descargados, {len(results['errores'])} errores")
+                    logger.warn(f"Completado parcialmente: {len(results['pdfs_descargados'])} PDFs descargados, {len(results['errores'])} errores")
                 else:
                     status = "failed"
-                    print(f"❌ Falló: {client_data['name']} - {len(results['errores'])} errores")
+                    logger.error(f"Falló: {len(results['errores'])} errores")
             else:
                 status = "success"
-                print(
-                    f"✅ Completado exitosamente: {client_data['name']} - {len(results['pdfs_descargados'])} PDFs descargados")
+                logger.info(f"Completado exitosamente: {len(results['pdfs_descargados'])} PDFs descargados")
 
             return {
                 "url": client_data['url'],
@@ -56,7 +61,7 @@ async def _async_worker(client_data, target_date, client_download_dir):
             }
 
         except Exception as e:
-            print(f"❌ ERROR crítico con {client_data['name']}: {e}")
+            logger.error(f"ERROR crítico: {e}")
             return {
                 "url": client_data['url'],
                 "name": client_data['name'],
@@ -70,33 +75,34 @@ async def _async_worker(client_data, target_date, client_download_dir):
                 "status": "critical_error"
             }
         finally:
-            # Asegurarse de cerrar todo correctamente
             await page.close()
             await context.close()
             await browser.close()
 
 
-def process_single_client(client_data, target_date, base_download_directory):
+def process_single_client(client_data, target_date, base_download_directory, app_env):
     """
     Función SÍNCRONA que se ejecutará en paralelo.
     """
     client = client_data
     client_download_dir = os.path.join(base_download_directory, client['dir_name'])
+    execution_id = client['execution_id']
+    print(f"🎯 Iniciando ejecución con ID: {execution_id}")
 
-    print(f"🚀 Iniciando procesamiento de {client['name']} en proceso {os.getpid()}")
+    logger = Logger(client['name'], execution_id)
+
+    logger.info(f"Iniciando procesamiento en proceso {os.getpid()}")
 
     try:
-        # Tareas síncronas
-        cleanup_directories(client_download_dir)
+        if app_env == 'development':
+            cleanup_directories(client_download_dir)
 
-        # Ejecutar el worker asíncrono
-        return asyncio.run(_async_worker(client, target_date, client_download_dir))
+        return asyncio.run(_async_worker(client, target_date, client_download_dir, app_env, execution_id))
 
     except Exception as e:
-        url = client["url"]
-        print(f"❌ ERROR crítico con {client['name']}: {e}")
+        logger.error(f"ERROR crítico en el proceso: {e}")
         return {
-            "url": url,
+            "url": client["url"],
             "name": client['name'],
             "results": {
                 "pdfs_descargados": [],
@@ -108,10 +114,9 @@ def process_single_client(client_data, target_date, base_download_directory):
             "status": "critical_error"
         }
 
-
-def print_detailed_summary(results_list):
+def print_and_get_summary(results_list):
     """
-    Imprime un resumen detallado y formateado de los resultados.
+    Imprime un resumen detallado y formateado de los resultados y retorna el resumen.
     """
     print("\n\n" + "=" * 80)
     print("                    RESUMEN DETALLADO DE EJECUCIÓN")
@@ -154,7 +159,8 @@ def print_detailed_summary(results_list):
         if pdfs:
             print("   Archivos:")
             for pdf in pdfs[:5]:  # Mostrar máximo 5 PDFs
-                print(f"      - {pdf['centro']}/{pdf['archivo']}")
+                file_info = pdf.get('s3_url', pdf.get('archivo', 'N/A'))
+                print(f"      - {file_info}")
             if len(pdfs) > 5:
                 print(f"      ... y {len(pdfs) - 5} más")
 
@@ -179,14 +185,59 @@ def print_detailed_summary(results_list):
     print(f"Total de errores: {total_errors}")
     print("=" * 80)
 
+    return {
+        "total_portals_processed": len(results_list),
+        "successful_portals": successful_portals,
+        "partial_portals": partial_portals,
+        "failed_portals": failed_portals,
+        "total_pdfs_downloaded": total_pdfs,
+        "total_errors": total_errors,
+    }
+
+
+def save_results_to_dynamodb(results_list, summary_data):
+    """
+    Guarda los resultados del procesamiento en DynamoDB.
+    """
+    from dynamodb_uploader import save_portal_report, save_global_summary
+
+    print("\n" + "=" * 80)
+    print("              GUARDANDO RESULTADOS EN DYNAMODB")
+    print("=" * 80)
+
+    # Guardar reportes individuales
+    for result in results_list:
+        portal_name = result["name"]
+        status = result["status"]
+        pdfs = result["results"]["pdfs_descargados"]
+        errors = result["results"]["errores"]
+
+        if status in ["success", "partial_success"]:
+            dynamo_status = "EXITOSO" if status == "success" else "PARCIALMENTE EXITOSO"
+        else:
+            dynamo_status = "FALLIDO"
+
+        report_data = {
+            "portal_name": portal_name,
+            "url": result["url"],
+            "status": dynamo_status,
+            "pdfs_downloaded": len(pdfs),
+            "files": [pdf.get('s3_url', pdf.get('archivo')) for pdf in pdfs],
+            "errors": errors,
+            "target_date": result.get("target_date"),
+        }
+        save_portal_report(report_data)
+
+    # Guardar resumen global
+    save_global_summary(summary_data)
+
 
 def main():
     # --- Configuración General ---
     target_date = "2025/04/25"
     base_download_directory = "notes_downloads"
-    MAX_CONCURRENT_CLIENTS = 4  # Máximo de clientes en paralelo
+    MAX_CONCURRENT_CLIENTS = 4
 
-    # Lista de portales a procesar
     portal_clients = [
         {
             "nit": "891303109",
@@ -194,6 +245,7 @@ def main():
             "name": "Surtifamiliar",
             "url": "https://portalproveedores.surtifamiliar.com",
             "dir_name": "SURTIFAMILIAR",
+            "execution_id": "a57b5c52feaa4e3a8718ab4c4b0a01c6"
         },
         {
             "nit": "891303109",
@@ -201,6 +253,7 @@ def main():
             "name": "Megatiendas",
             "url": "https://proveedores.megatiendas.co/megatiendas",
             "dir_name": "MEGATIENDAS",
+            "execution_id": "3587e34b30ad4f609b6caafce9308496"
         },
         {
             "nit": "891303109",
@@ -208,6 +261,7 @@ def main():
             "name": "Mercar",
             "url": "http://190.85.196.187",
             "dir_name": "MERCAR",
+            "execution_id": "286707d82bcf45a1999f2ab4b4f832e8"
         },
         {
             "nit": "891303109",
@@ -215,36 +269,41 @@ def main():
             "name": "La Montaña",
             "url": "https://proveedores.lamontana.co",
             "dir_name": "LAMONTANA",
+            "execution_id": "fa48558d5cfe46f79ab0ab54010fb579"
         },
-        # {
-        #     "nit": "891303109",
-        #     "password": "Toning2020$",
-        #     "name": "El Jardin",
-        #     "url": "https://proveedores.eljardin.co",
-        #     "dir_name": "ELJARDIN",
-        # },
     ]
 
-    print(
-        f"🎯 Procesando {len(portal_clients)} portales con máximo {MAX_CONCURRENT_CLIENTS} en paralelo usando multiprocessing.Pool")
+    print(f"🔄 Procesando {len(portal_clients)} portales con máximo {MAX_CONCURRENT_CLIENTS} en paralelo.")
     print(f"📅 Fecha objetivo: {target_date}\n")
+    print(f"⚙️ Modo de ejecución: {APP_ENV.upper()}\n")
 
-    # Preparar los argumentos para cada tarea
-    tasks = [(client, target_date, base_download_directory) for client in portal_clients]
+    tasks = [(client, target_date, base_download_directory, APP_ENV) for client in portal_clients]
 
-    # --- EJECUCIÓN PARALELA CON MULTIPROCESSING ---
     with multiprocessing.Pool(processes=MAX_CONCURRENT_CLIENTS) as pool:
         results_list = pool.starmap(process_single_client, tasks)
+    
+    for result in results_list:
+        result["target_date"] = target_date
 
-    # Mostrar resumen detallado
-    print_detailed_summary(results_list)
+    summary_data = print_and_get_summary(results_list)
 
-    # Guardar resultados en un archivo para referencia
-    import json
-    results_file = f"logs/resultados_scraping_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(results_file, 'w', encoding='utf-8') as f:
-        json.dump(results_list, f, ensure_ascii=False, indent=2)
-    print(f"\n💾 Resultados guardados en: {results_file}")
+    if APP_ENV == 'production':
+        save_results_to_dynamodb(results_list, summary_data)
+
+    results_file_name = f"resultados_scraping_{datetime.now().strftime('%Y%m%d')}.json"
+    results_content = json.dumps(results_list, ensure_ascii=False, indent=2)
+
+    if APP_ENV == 'development':
+        with open(results_file_name, 'w', encoding='utf-8') as f:
+            f.write(results_content)
+        print(f"\n💾 Resultados guardados localmente en: {results_file_name}")
+    elif APP_ENV == 'production':
+        s3_uploader = S3Uploader()
+        try:
+            s3_url = asyncio.run(s3_uploader.upload_log_to_s3(results_content, results_file_name))
+            print(f"\n☁️ Resultados de log subidos a S3: {s3_url}")
+        except Exception as e:
+            print(f"❌ Error al subir el log a S3: {e}")
 
 
 if __name__ == "__main__":

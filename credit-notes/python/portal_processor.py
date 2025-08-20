@@ -2,10 +2,11 @@ import asyncio
 from datetime import datetime
 from typing import Optional, Callable, Any, re
 import traceback
-
 from playwright.async_api import Page, expect, TimeoutError as PlaywrightTimeout
 import os
 import base64
+from s3_uploader import S3Uploader
+from logger import Logger
 
 
 class AsyncPortalProcessor:
@@ -14,7 +15,7 @@ class AsyncPortalProcessor:
     """
     JS_BLOB_TO_BASE64 = "async u => (await fetch(u).then(r=>r.blob()).then(b=>new Promise((s,j)=>{const r=new FileReader();r.onload=()=>s(r.result.split(',',2)[1]);r.onerror=j;r.readAsDataURL(b)})))"
 
-    def __init__(self, page: Page, main_url: str, credentials: dict, target_date: str, base_download_dir: str):
+    def __init__(self, page: Page, main_url: str, credentials: dict, target_date: str, base_download_dir: str, app_env: str, logger: Logger):
         self.page = page
         self.main_url = main_url
         self.credentials = credentials
@@ -24,6 +25,9 @@ class AsyncPortalProcessor:
         self.errors_summary = []  # Para almacenar errores después de reintentos fallidos
         self.max_retries = 3
         self.retry_delay = 5
+        self.s3_uploader = S3Uploader()
+        self.app_env = app_env
+        self.logger = logger
 
     async def _retry_with_reload(self, func: Callable, *args, **kwargs) -> Optional[Any]:
         """
@@ -146,8 +150,11 @@ class AsyncPortalProcessor:
             })
 
         print(f"\n>>> Procesamiento completado para: {self.main_url} <<<")
+        self.logger.info(f"Procesamiento completado.")
         print(f"    Total PDFs descargados: {len(self.downloaded_pdfs_summary)}")
+        self.logger.info(f"Total PDFs descargados: {len(self.downloaded_pdfs_summary)}")
         print(f"    Total errores: {len(self.errors_summary)}")
+        self.logger.info(f"Total errores: {len(self.errors_summary)}")
 
         return {
             "pdfs_descargados": self.downloaded_pdfs_summary,
@@ -317,7 +324,7 @@ class AsyncPortalProcessor:
             })
             return
 
-        # Procesar centros normalmente si existen
+        # Procesar centros normally si existen
         num_centers = await self.page.locator(centers_selector).count()
         print(f"Se encontraron {num_centers} centros de operación.")
 
@@ -440,14 +447,8 @@ class AsyncPortalProcessor:
                 row_data = {"document": cells[0], "cross_reference_doc": cells[1], "date": cells[2].strip()}
 
                 if self._dates_match(row_data["date"], self.target_date):
-                    if not directory_created:
-                        folder_name = f"{center_code}_{center_name.replace(' ', '_')}"
-                        center_folder_path = os.path.join(self.base_download_dir, folder_name)
-                        os.makedirs(center_folder_path, exist_ok=True)
-                        print(f"Directorio creado: '{center_folder_path}'")
-                        directory_created = True
-
-                    await self._download_pdf(current_row, row_data, center_folder_path)
+                    folder_name = f"{center_code}_{center_name.replace(' ', '_')}"
+                    await self._download_pdf(current_row, row_data, folder_name)
             except Exception as e:
                 print(f"⚠️ Error procesando fila {j + 1}: {str(e)}")
                 continue
@@ -471,13 +472,17 @@ class AsyncPortalProcessor:
             pdf_bytes = base64.b64decode(base64_pdf_data)
 
             file_name = f"documento_{row_data['document']}_{row_data['cross_reference_doc']}.pdf"
-            file_path = os.path.join(folder_path, file_name)
 
-            with open(file_path, "wb") as f:
-                f.write(pdf_bytes)
-            print(f"  -> 📄 PDF guardado en: {file_path}")
-
-            self.downloaded_pdfs_summary.append({"centro": os.path.basename(folder_path), "archivo": file_name})
+            # Save to S3 or local based on environment
+            if self.app_env == "production":
+                s3_url = await self.s3_uploader.upload_file_to_s3(pdf_bytes, file_name, os.path.basename(folder_path))
+                self.downloaded_pdfs_summary.append({"centro": os.path.basename(folder_path), "archivo": file_name, "s3_url": s3_url})
+            else:
+                file_path = os.path.join(folder_path, file_name)
+                with open(file_path, "wb") as f:
+                    f.write(pdf_bytes)
+                print(f"  -> 📄 PDF guardado en: {file_path}")
+                self.downloaded_pdfs_summary.append({"centro": os.path.basename(folder_path), "archivo": file_name})
 
             await self.page.get_by_role("button", name="Volver").click()
             await expect(self.page.get_by_role("heading", name="Detalle del documento")).to_be_visible()
