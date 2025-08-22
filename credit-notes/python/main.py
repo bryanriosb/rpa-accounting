@@ -5,13 +5,17 @@ from datetime import datetime
 import json
 import uuid
 
+from email_sender import send_email_with_attachments
+from logger import Logger
 from playwright.async_api import async_playwright
 from portal_processor import AsyncPortalProcessor
-from utils import cleanup_directories
 from s3_uploader import S3Uploader
-from logger import Logger
+from utils import cleanup_directories
+from dotenv import load_dotenv
 
-APP_ENV = os.getenv("APP_ENV", "production")
+load_dotenv()
+
+APP_ENV = os.getenv("APP_ENV", "development")
 
 async def _async_worker(client_data, target_date, client_download_dir, app_env, execution_id):
     """
@@ -20,7 +24,7 @@ async def _async_worker(client_data, target_date, client_download_dir, app_env, 
     logger = Logger(client_data['name'], execution_id)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, slow_mo=50)
+        browser = await p.chromium.launch(headless=False, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
@@ -90,7 +94,6 @@ def process_single_client(client_data, target_date, base_download_directory, app
     print(f"🎯 Iniciando ejecución con ID: {execution_id}")
 
     logger = Logger(client['name'], execution_id)
-
     logger.info(f"Iniciando procesamiento en proceso {os.getpid()}")
 
     try:
@@ -247,14 +250,14 @@ def main():
             "dir_name": "SURTIFAMILIAR",
             "execution_id": "a57b5c52feaa4e3a8718ab4c4b0a01c6"
         },
-        {
-            "nit": "891303109",
-            "password": "2023",
-            "name": "Megatiendas",
-            "url": "https://proveedores.megatiendas.co/megatiendas",
-            "dir_name": "MEGATIENDAS",
-            "execution_id": "3587e34b30ad4f609b6caafce9308496"
-        },
+        # {
+        #     "nit": "891303109",
+        #     "password": "2023",
+        #     "name": "Megatiendas",
+        #     "url": "https://proveedores.megatiendas.co/megatiendas",
+        #     "dir_name": "MEGATIENDAS",
+        #     "execution_id": "3587e34b30ad4f609b6caafce9308496"
+        # },
         {
             "nit": "891303109",
             "password": "l18mr7",
@@ -304,6 +307,16 @@ def main():
             print(f"\n☁️ Resultados de log subidos a S3: {s3_url}")
         except Exception as e:
             print(f"❌ Error al subir el log a S3: {e}")
+
+    
+    email_recipients = os.getenv("EMAIL_RECIPIENTS")
+    if email_recipients:
+        recipients = [e.strip() for e in email_recipients.split(',')]
+        subject = f"Reporte de Notas de Crédito - {datetime.now().strftime('%Y-%m-%d')}"
+        body = "Se adjuntan las notas de crédito descargadas."
+        send_email_with_attachments(recipients, subject, body, base_download_directory)
+    else:
+        print("⚠️ La variable de entorno EMAIL_RECIPIENTS no está definida. No se enviará correo.")
 
 
 if __name__ == "__main__":

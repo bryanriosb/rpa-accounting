@@ -429,9 +429,6 @@ class AsyncPortalProcessor:
         documents_table = self.page.locator("table.info-table")
         await expect(documents_table).to_be_visible(timeout=10000)
 
-        directory_created = False
-        center_folder_path = ""
-
         rows_selector = "table.info-table tbody tr"
         try:
             await self.page.wait_for_selector(rows_selector, timeout=5000)
