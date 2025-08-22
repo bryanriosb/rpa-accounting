@@ -4,11 +4,8 @@ services:
       context: ..
       dockerfile: credit-notes/Dockerfile
     volumes:
-      - ./credit-notes/python/notes_downloads:/app/notes_downloads
-    environment:
-      - APP_ENV=development
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=${AWS_REGION}
-      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
-      - EVENT_BUS_NAME=${EVENT_BUS_NAME}
+      - ./python/notes_downloads:/app/notes_downloads
+      - ./python/logs:/app/logs
+    env_file:
+      - ./.env
+

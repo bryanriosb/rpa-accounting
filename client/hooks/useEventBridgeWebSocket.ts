@@ -20,9 +20,7 @@ export function useEventBridgeWebSocket(): UseEventBridgeWebSocketReturn {
     const url = await getEnv('WEBSOCKET_URL')
     const apiKey = await getEnv('WEBSOCKET_API_KEY')
     const wsUrl = `${url}?x-api-key=${apiKey}`
-    console.log(`Conectando a WebSocket: ${wsUrl}`)
     if (wsRef.current?.readyState === WebSocket.OPEN) return
-    console.log(`Conectando a WebSocket: ${wsUrl}`)
 
     if (!wsUrl) {
       console.error('WEBSOCKET_URL no está configurado')
@@ -32,7 +30,6 @@ export function useEventBridgeWebSocket(): UseEventBridgeWebSocketReturn {
     wsRef.current = new WebSocket(wsUrl)
 
     wsRef.current.onopen = () => {
-      console.log('WebSocket conectado')
       setIsConnected(true)
       setConnectionStatus('connected')
 
@@ -55,7 +52,6 @@ export function useEventBridgeWebSocket(): UseEventBridgeWebSocketReturn {
     }
 
     wsRef.current.onclose = () => {
-      console.log('WebSocket desconectado')
       setIsConnected(false)
       setConnectionStatus('disconnected')
 
@@ -98,5 +94,6 @@ export function useEventBridgeWebSocket(): UseEventBridgeWebSocketReturn {
     connectionStatus,
     reconnect: connect,
     disconnect,
+    setEvents,
   }
 }

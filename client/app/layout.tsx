@@ -2,6 +2,7 @@ import './globals.css'
 
 import { SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { AppSidebar } from '@/components/AppSidebar'
+import { Toaster } from '@/components/ui/sonner'
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -10,9 +11,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <SidebarProvider>
           <AppSidebar />
           <SidebarTrigger />
-          <main className="py-8 px-6 h-full w-full overflow-y-auto">
-            {children}
-          </main>
+          <main className="p-8  h-full w-full overflow-y-auto">{children}</main>
+          <Toaster />
         </SidebarProvider>
       </body>
     </html>

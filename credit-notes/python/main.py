@@ -3,6 +3,7 @@ import os
 import asyncio
 from datetime import datetime
 import json
+import re
 import uuid
 
 from email_sender import send_email_with_attachments
@@ -10,12 +11,16 @@ from logger import Logger
 from playwright.async_api import async_playwright
 from portal_processor import AsyncPortalProcessor
 from s3_uploader import S3Uploader
-from utils import cleanup_directories
+from utils import cleanup_directories, cleanup_base_download_directory
 from dotenv import load_dotenv
+from sqs_poller import SQSPoller
+import logging
 
 load_dotenv()
 
-APP_ENV = os.getenv("APP_ENV", "development")
+console_logger = logging.getLogger(__name__)
+
+APP_ENV = os.getenv("APP_ENV", "production")
 
 async def _async_worker(client_data, target_date, client_download_dir, app_env, execution_id):
     """
@@ -24,7 +29,7 @@ async def _async_worker(client_data, target_date, client_download_dir, app_env, 
     logger = Logger(client_data['name'], execution_id)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False, slow_mo=50)
+        browser = await p.chromium.launch(headless=True, slow_mo=50)
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
@@ -37,6 +42,7 @@ async def _async_worker(client_data, target_date, client_download_dir, app_env, 
             processor = AsyncPortalProcessor(
                 page=page,
                 main_url=client_data["url"],
+                portal_name=client_data["name"],
                 credentials=credentials,
                 target_date=target_date,
                 base_download_dir=client_download_dir,
@@ -97,8 +103,7 @@ def process_single_client(client_data, target_date, base_download_directory, app
     logger.info(f"Iniciando procesamiento en proceso {os.getpid()}")
 
     try:
-        if app_env == 'development':
-            cleanup_directories(client_download_dir)
+        cleanup_directories(client_download_dir)
 
         return asyncio.run(_async_worker(client, target_date, client_download_dir, app_env, execution_id))
 
@@ -234,15 +239,30 @@ def save_results_to_dynamodb(results_list, summary_data):
     # Guardar resumen global
     save_global_summary(summary_data)
 
-
 def main():
-    # --- Configuración General ---
-    target_date = "2025/04/25"
-    base_download_directory = "notes_downloads"
-    MAX_CONCURRENT_CLIENTS = 4
+    # Required to reload table in client
+    logger = Logger('client', 'a821585f-4891-4a5d-80d4-c3414190c09b')
 
-    portal_clients = [
-        {
+    sqs_queue_url = os.getenv("SQS_QUEUE_URL")
+    if not sqs_queue_url:
+        print("SQS_QUEUE_URL environment variable not set. Exiting.")
+        return
+
+    poller = SQSPoller(queue_url=sqs_queue_url)
+
+    while True:
+        target_date = poller.poll_for_message()
+        valid_date_format = re.fullmatch(r"\d{4}/\d{2}/\d{2}", target_date)
+        if not target_date or not valid_date_format:
+            # poller will log errors, continue polling
+            continue
+
+        # --- Configuración General ---
+        base_download_directory = "notes_downloads"
+        MAX_CONCURRENT_CLIENTS = 4
+
+        portal_clients = [
+            {
             "nit": "891303109",
             "password": "Cartera2023",
             "name": "Surtifamiliar",
@@ -274,50 +294,55 @@ def main():
             "dir_name": "LAMONTANA",
             "execution_id": "fa48558d5cfe46f79ab0ab54010fb579"
         },
-    ]
+        ]
 
-    print(f"🔄 Procesando {len(portal_clients)} portales con máximo {MAX_CONCURRENT_CLIENTS} en paralelo.")
-    print(f"📅 Fecha objetivo: {target_date}\n")
-    print(f"⚙️ Modo de ejecución: {APP_ENV.upper()}\n")
+        print(f"🔄 Procesando {len(portal_clients)} portales con máximo {MAX_CONCURRENT_CLIENTS} en paralelo.")
+        print(f"📅 Fecha objetivo: {target_date}\n")
+        print(f"⚙️ Modo de ejecución: {APP_ENV.upper()}\n")
+        
+        # Limpiar completamente el directorio base antes de iniciar
+        cleanup_base_download_directory(base_download_directory)
 
-    tasks = [(client, target_date, base_download_directory, APP_ENV) for client in portal_clients]
+        tasks = [(client, target_date, base_download_directory, APP_ENV) for client in portal_clients]
 
-    with multiprocessing.Pool(processes=MAX_CONCURRENT_CLIENTS) as pool:
-        results_list = pool.starmap(process_single_client, tasks)
-    
-    for result in results_list:
-        result["target_date"] = target_date
+        with multiprocessing.Pool(processes=MAX_CONCURRENT_CLIENTS) as pool:
+            results_list = pool.starmap(process_single_client, tasks)
+        
+        for result in results_list:
+            result["target_date"] = target_date
 
-    summary_data = print_and_get_summary(results_list)
+        summary_data = print_and_get_summary(results_list)
 
-    if APP_ENV == 'production':
-        save_results_to_dynamodb(results_list, summary_data)
+        if APP_ENV == 'production':
+            save_results_to_dynamodb(results_list, summary_data)
 
-    results_file_name = f"resultados_scraping_{datetime.now().strftime('%Y%m%d')}.json"
-    results_content = json.dumps(results_list, ensure_ascii=False, indent=2)
+        results_file_name = f"resultados_scraping_{datetime.now().strftime('%Y%m%d')}.json"
+        results_content = json.dumps(results_list, ensure_ascii=False, indent=2)
 
-    if APP_ENV == 'development':
-        with open(results_file_name, 'w', encoding='utf-8') as f:
-            f.write(results_content)
-        print(f"\n💾 Resultados guardados localmente en: {results_file_name}")
-    elif APP_ENV == 'production':
-        s3_uploader = S3Uploader()
-        try:
-            s3_url = asyncio.run(s3_uploader.upload_log_to_s3(results_content, results_file_name))
-            print(f"\n☁️ Resultados de log subidos a S3: {s3_url}")
-        except Exception as e:
-            print(f"❌ Error al subir el log a S3: {e}")
+        if APP_ENV == 'development':
+            path_dir = f'logs/{results_file_name}'
+            with open(path_dir, 'w', encoding='utf-8') as f:
+                f.write(results_content)
+            print(f"\n💾 Resultados guardados localmente en: {results_file_name}")
+        elif APP_ENV == 'production':
+            s3_uploader = S3Uploader()
+            try:
+                s3_url = asyncio.run(s3_uploader.upload_log_to_s3(results_content, results_file_name))
+                print(f"\n☁️ Resultados de log subidos a S3: {s3_url}")
+            except Exception as e:
+                print(f"❌ Error al subir el log a S3: {e}")
 
-    
-    email_recipients = os.getenv("EMAIL_RECIPIENTS")
-    if email_recipients:
-        recipients = [e.strip() for e in email_recipients.split(',')]
-        subject = f"Reporte de Notas de Crédito - {datetime.now().strftime('%Y-%m-%d')}"
-        body = "Se adjuntan las notas de crédito descargadas."
-        send_email_with_attachments(recipients, subject, body, base_download_directory)
-    else:
-        print("⚠️ La variable de entorno EMAIL_RECIPIENTS no está definida. No se enviará correo.")
+        
+        email_recipients = os.getenv("EMAIL_RECIPIENTS")
+        target_date_formatted = target_date.replace("/", "-")  # Formatear fecha para el asunto del correo
+        if email_recipients:
+            recipients = [e.strip() for e in email_recipients.split(',')]
+            subject = f"Reporte de Notas de Crédito - {datetime.now().strftime('%Y-%m-%d')} para fecha objetivo {target_date_formatted}"
+            body = f"Se adjuntan las notas de crédito descargadas correspondientes a la fecha objetivo {target_date}.\n\n"
+            send_email_with_attachments(recipients, subject, body, base_download_directory)
+        else:
+            print("⚠️ La variable de entorno EMAIL_RECIPIENTS no está definida. No se enviará correo.")
 
-
+        logger.info("Finished")
 if __name__ == "__main__":
     main()

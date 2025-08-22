@@ -15,8 +15,9 @@ class AsyncPortalProcessor:
     """
     JS_BLOB_TO_BASE64 = "async u => (await fetch(u).then(r=>r.blob()).then(b=>new Promise((s,j)=>{const r=new FileReader();r.onload=()=>s(r.result.split(',',2)[1]);r.onerror=j;r.readAsDataURL(b)})))"
 
-    def __init__(self, page: Page, main_url: str, credentials: dict, target_date: str, base_download_dir: str, app_env: str, logger: Logger):
+    def __init__(self, page: Page, portal_name: str, main_url: str, credentials: dict, target_date: str, base_download_dir: str, app_env: str, logger: Logger):
         self.page = page
+        self.portal_name = portal_name
         self.main_url = main_url
         self.credentials = credentials
         self.target_date = target_date
@@ -467,19 +468,24 @@ class AsyncPortalProcessor:
 
             base64_pdf_data = await self.page.evaluate(self.JS_BLOB_TO_BASE64, blob_url)
             pdf_bytes = base64.b64decode(base64_pdf_data)
+            doc_prefix = self.portal_name.replace(' ', '_').lower()
+            file_name = f"{doc_prefix}_{row_data['document']}_{row_data['cross_reference_doc']}.pdf"
 
-            file_name = f"documento_{row_data['document']}_{row_data['cross_reference_doc']}.pdf"
+            # Guardar localmente siempre (para el correo)
+            full_folder_path = os.path.join(self.base_download_dir, folder_path)
+            os.makedirs(full_folder_path, exist_ok=True)
+            file_path = os.path.join(full_folder_path, file_name)
+            with open(file_path, "wb") as f:
+                f.write(pdf_bytes)
+            print(f"  -> 📄 PDF guardado en: {file_path}")
 
-            # Save to S3 or local based on environment
+            # Subir a S3 solo en producción
             if self.app_env == "production":
                 s3_url = await self.s3_uploader.upload_file_to_s3(pdf_bytes, file_name, os.path.basename(folder_path))
                 self.downloaded_pdfs_summary.append({"centro": os.path.basename(folder_path), "archivo": file_name, "s3_url": s3_url})
             else:
-                file_path = os.path.join(folder_path, file_name)
-                with open(file_path, "wb") as f:
-                    f.write(pdf_bytes)
-                print(f"  -> 📄 PDF guardado en: {file_path}")
                 self.downloaded_pdfs_summary.append({"centro": os.path.basename(folder_path), "archivo": file_name})
+                
 
             await self.page.get_by_role("button", name="Volver").click()
             await expect(self.page.get_by_role("heading", name="Detalle del documento")).to_be_visible()

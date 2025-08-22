@@ -1,0 +1,42 @@
+[
+  {
+    "url": "https://portalproveedores.surtifamiliar.com",
+    "name": "Surtifamiliar",
+    "results": {
+      "pdfs_descargados": [
+        {
+          "centro": "006_VALLEREAL",
+          "archivo": "Surtifamiliar_NA-10006_NAVA10006.pdf"
+        }
+      ],
+      "errores": []
+    },
+    "status": "success",
+    "target_date": "2025/04/25"
+  },
+  {
+    "url": "http://190.85.196.187",
+    "name": "Mercar",
+    "results": {
+      "pdfs_descargados": [
+        {
+          "centro": "001_MERCAR",
+          "archivo": "Mercar_DP-208690_.pdf"
+        }
+      ],
+      "errores": []
+    },
+    "status": "success",
+    "target_date": "2025/04/25"
+  },
+  {
+    "url": "https://proveedores.lamontana.co",
+    "name": "La Montaña",
+    "results": {
+      "pdfs_descargados": [],
+      "errores": []
+    },
+    "status": "success",
+    "target_date": "2025/04/25"
+  }
+]
