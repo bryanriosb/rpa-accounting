@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 from typing import Optional, Callable, Any, re
 import traceback
+import unicodedata
 from playwright.async_api import Page, expect, TimeoutError as PlaywrightTimeout
 import os
 import base64
@@ -151,11 +152,10 @@ class AsyncPortalProcessor:
             })
 
         print(f"\n>>> Procesamiento completado para: {self.main_url} <<<")
-        self.logger.info(f"Procesamiento completado.")
+        self.logger.info(f"Procesamiento completado")
         print(f"    Total PDFs descargados: {len(self.downloaded_pdfs_summary)}")
         self.logger.info(f"Total PDFs descargados: {len(self.downloaded_pdfs_summary)}")
         print(f"    Total errores: {len(self.errors_summary)}")
-        self.logger.info(f"Total errores: {len(self.errors_summary)}")
 
         return {
             "pdfs_descargados": self.downloaded_pdfs_summary,
@@ -344,7 +344,9 @@ class AsyncPortalProcessor:
                 except:
                     print(f"⚠️ No se pudo obtener información del centro {i + 1}")
 
-                print(f"\n--- Procesando Centro {i + 1}/{num_centers}: {center_name} ({center_code}) ---")
+                message = f"Procesando Centro {i + 1}/{num_centers}: {center_code} {center_name}"
+                print(f"\n--- {message} ---")
+                self.logger.info(message)
 
                 # Intentar procesar el centro con reintentos
                 success = False
@@ -426,6 +428,20 @@ class AsyncPortalProcessor:
                 except:
                     pass
 
+    async def _normalize_text(self, text):
+        """
+        Removes accents and converts ñ -> n, keeping spaces as _
+        """
+        # Normalize and remove accents
+        normalized_text = unicodedata.normalize('NFD', text)
+        text_without_accents = ''.join(char for char in normalized_text if unicodedata.category(char) != 'Mn')
+        
+        # Replace ñ/Ñ and spaces
+        text_without_accents = text_without_accents.replace('ñ', 'n').replace('Ñ', 'N')
+        text_without_accents = text_without_accents.replace(' ', '_')
+        
+        return text_without_accents.lower()
+
     async def _process_documents_for_center(self, center_code: str, center_name: str):
         documents_table = self.page.locator("table.info-table")
         await expect(documents_table).to_be_visible(timeout=10000)
@@ -438,6 +454,7 @@ class AsyncPortalProcessor:
             print("No se encontraron documentos en la tabla para este centro.")
             return
 
+        center_name_parsed = await self._normalize_text(center_name)
         for j in range(num_rows):
             try:
                 current_row = self.page.locator(rows_selector).nth(j)
@@ -445,13 +462,13 @@ class AsyncPortalProcessor:
                 row_data = {"document": cells[0], "cross_reference_doc": cells[1], "date": cells[2].strip()}
 
                 if self._dates_match(row_data["date"], self.target_date):
-                    folder_name = f"{center_code}_{center_name.replace(' ', '_')}"
-                    await self._download_pdf(current_row, row_data, folder_name)
+                    folder_name = f"{center_code}_{center_name_parsed}"
+                    await self._download_pdf(current_row, row_data, folder_name, center_code)
             except Exception as e:
                 print(f"⚠️ Error procesando fila {j + 1}: {str(e)}")
                 continue
 
-    async def _download_pdf(self, row_locator, row_data: dict, folder_path: str):
+    async def _download_pdf(self, row_locator, row_data: dict, folder_path: str, center_name: str):
         try:
             print(f"  -> ✅ Coincidencia encontrada (Doc: {row_data['document']}). Descargando...")
 
@@ -468,8 +485,8 @@ class AsyncPortalProcessor:
 
             base64_pdf_data = await self.page.evaluate(self.JS_BLOB_TO_BASE64, blob_url)
             pdf_bytes = base64.b64decode(base64_pdf_data)
-            doc_prefix = self.portal_name.replace(' ', '_').lower()
-            file_name = f"{doc_prefix}_{row_data['document']}_{row_data['cross_reference_doc']}.pdf"
+            doc_prefix = await  self._normalize_text(self.portal_name)
+            file_name = f"{doc_prefix}_centro_{center_name}_{row_data['document']}_{row_data['cross_reference_doc']}.pdf"
 
             # Guardar localmente siempre (para el correo)
             full_folder_path = os.path.join(self.base_download_dir, folder_path)

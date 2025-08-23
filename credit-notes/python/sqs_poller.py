@@ -30,7 +30,8 @@ class SQSPoller:
                 if "Messages" in response:
                     message = response["Messages"][0]
                     receipt_handle = message["ReceiptHandle"]
-                    target_date = message["Body"]
+                    payload = json.loads(message["Body"])
+
                     
                     # Delete the message from the queue
                     self.sqs_client.delete_message(
@@ -38,8 +39,9 @@ class SQSPoller:
                         ReceiptHandle=receipt_handle
                     )
                     
-                    logger.info(f"Received and deleted message. Target date: {target_date}")
-                    return target_date
+                    logger.info(f"Received and deleted message. payload: {payload}")
+                    return payload
+
                 else:
                     logger.info("No messages in queue. Waiting...")
             except Exception as e:

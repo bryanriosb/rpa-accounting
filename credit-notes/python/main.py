@@ -61,7 +61,7 @@ async def _async_worker(client_data, target_date, client_download_dir, app_env, 
                     logger.error(f"Falló: {len(results['errores'])} errores")
             else:
                 status = "success"
-                logger.info(f"Completado exitosamente: {len(results['pdfs_descargados'])} PDFs descargados")
+                logger.info(f"Procesamiento completado exitosamente: {len(results['pdfs_descargados'])} PDFs descargados")
 
             return {
                 "url": client_data['url'],
@@ -71,7 +71,6 @@ async def _async_worker(client_data, target_date, client_download_dir, app_env, 
             }
 
         except Exception as e:
-            logger.error(f"ERROR crítico: {e}")
             return {
                 "url": client_data['url'],
                 "name": client_data['name'],
@@ -98,17 +97,12 @@ def process_single_client(client_data, target_date, base_download_directory, app
     client_download_dir = os.path.join(base_download_directory, client['dir_name'])
     execution_id = client['execution_id']
     print(f"🎯 Iniciando ejecución con ID: {execution_id}")
-
-    logger = Logger(client['name'], execution_id)
-    logger.info(f"Iniciando procesamiento en proceso {os.getpid()}")
-
     try:
         cleanup_directories(client_download_dir)
 
         return asyncio.run(_async_worker(client, target_date, client_download_dir, app_env, execution_id))
 
     except Exception as e:
-        logger.error(f"ERROR crítico en el proceso: {e}")
         return {
             "url": client["url"],
             "name": client['name'],
@@ -239,6 +233,27 @@ def save_results_to_dynamodb(results_list, summary_data):
     # Guardar resumen global
     save_global_summary(summary_data)
 
+def validate_pdfs_exist(base_download_directory):
+    """
+    Verifies if PDF files exist using os.walk
+    """
+    pdf_files = []
+    
+    for root, dirs, files in os.walk(base_download_directory):
+        for file in files:
+            if file.lower().endswith('.pdf'):
+                pdf_path = os.path.join(root, file)
+                pdf_files.append(pdf_path)
+    
+    if pdf_files:
+        print(f"✅ Found {len(pdf_files)} PDF file(s)")
+        for pdf in pdf_files:
+            print(f"  - {pdf}")
+        return True
+    else:
+        print("❌ No PDF files found")
+        return False
+
 def main():
     # Required to reload table in client
     logger = Logger('client', 'a821585f-4891-4a5d-80d4-c3414190c09b')
@@ -251,7 +266,8 @@ def main():
     poller = SQSPoller(queue_url=sqs_queue_url)
 
     while True:
-        target_date = poller.poll_for_message()
+        payload = poller.poll_for_message()
+        target_date = payload["targetDate"]
         valid_date_format = re.fullmatch(r"\d{4}/\d{2}/\d{2}", target_date)
         if not target_date or not valid_date_format:
             # poller will log errors, continue polling
@@ -333,9 +349,9 @@ def main():
                 print(f"❌ Error al subir el log a S3: {e}")
 
         
-        email_recipients = os.getenv("EMAIL_RECIPIENTS")
+        email_recipients = payload["emails"]
         target_date_formatted = target_date.replace("/", "-")  # Formatear fecha para el asunto del correo
-        if email_recipients:
+        if email_recipients and validate_pdfs_exist(base_download_directory):
             recipients = [e.strip() for e in email_recipients.split(',')]
             subject = f"Reporte de Notas de Crédito - {datetime.now().strftime('%Y-%m-%d')} para fecha objetivo {target_date_formatted}"
             body = f"Se adjuntan las notas de crédito descargadas correspondientes a la fecha objetivo {target_date}.\n\n"
